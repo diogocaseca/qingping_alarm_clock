@@ -109,10 +109,10 @@ class CleargrassConfigFlow(ConfigFlow, domain=DOMAIN):
         """Handle validate step."""
         error = None
         qingping = Qingping(self.hass, self.mac, self.name)
-        await self._validate_device(qingping)
         try:
             error = await self._validate_device(qingping)
         except Exception as e:
+            _LOGGER.debug("Failed to validate %s: %s", self.mac, e)
             error = str(e)
         finally:
             await qingping.disconnect()

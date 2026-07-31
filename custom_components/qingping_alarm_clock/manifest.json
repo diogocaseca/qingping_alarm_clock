@@ -3,7 +3,8 @@
   "name": "Qingping Cleargrass CGD1 Alarm Clock",
   "codeowners": [
     "@ov1d1u",
-    "@CarstenHess"
+    "@CarstenHess",
+    "@diogocaseca"
   ],
   "config_flow": true,
   "dependencies": [
@@ -16,5 +17,5 @@
     "bleak>=0.17.0",
     "bleak-retry-connector>=3.0.0"
   ],
-  "version": "0.0.8"
+  "version": "0.0.9-rc1"
 }
