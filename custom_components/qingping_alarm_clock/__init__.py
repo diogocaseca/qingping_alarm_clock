@@ -35,7 +35,10 @@ async def async_setup_entry(
     async_register_services(hass)
 
     async def _connect_if_needed():
-        await instance.connect_if_needed()
+        try:
+            await instance.connect_if_needed()
+        except Exception:
+            _LOGGER.exception("Failed to connect to %s", mac)
 
     @callback
     def _async_discovered_device(

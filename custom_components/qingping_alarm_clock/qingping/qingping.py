@@ -2,6 +2,7 @@ import asyncio
 import logging
 import time
 from bleak import BleakClient
+from bleak.exc import BleakCharacteristicNotFoundError
 from datetime import time as dtime
 
 from homeassistant.core import HomeAssistant
@@ -19,7 +20,8 @@ from ..const import (
     ALARM_SLOTS_COUNT,
     DISCONNECT_DELAY,
     CONNECTION_TIMEOUT,
-    RETRY_INTERVAL
+    RETRY_INTERVAL,
+    SERVICE_DISCOVERY_TIMEOUT
 )
 from .events import (
     DEVICE_CONNECT,
@@ -74,28 +76,52 @@ class Qingping:
                 _LOGGER.debug(f"Failed to connect to {self.mac}: {e}")
                 return False
 
-            await asyncio.sleep(2.0)  # give some time for service discovery
+            try:
+                await self._wait_for_services()
 
-            _LOGGER.debug(f"Connected to {self.mac}, authenticating...")
+                _LOGGER.debug(f"Connected to {self.mac}, authenticating...")
 
-            # Step 1 auth
-            await self._write_gatt_char(MAIN_CHAR, AUTH_STEP_1)
+                # Step 1 auth
+                await self._write_gatt_char(MAIN_CHAR, AUTH_STEP_1)
 
-            # Step 2 auth
-            await self._write_gatt_char(MAIN_CHAR, AUTH_STEP_2)
+                # Step 2 auth
+                await self._write_gatt_char(MAIN_CHAR, AUTH_STEP_2)
 
-            self.eventbus.send(DEVICE_CONNECT, self)
+                self.eventbus.send(DEVICE_CONNECT, self)
 
-            # Read configuration
-            _LOGGER.debug("Reading configuration...")
-            await self.client.start_notify(CFG_READ_CHAR, self._notification_handler)
-            await self.get_configuration()
+                # Read configuration
+                _LOGGER.debug("Reading configuration...")
+                await self.client.start_notify(CFG_READ_CHAR, self._notification_handler)
+                await self.get_configuration()
 
-            # Read alarms
-            _LOGGER.debug("Reading alarms...")
-            await self.get_alarms()
+                # Read alarms
+                _LOGGER.debug("Reading alarms...")
+                await self.get_alarms()
 
-            return True
+                return True
+            except (BleakCharacteristicNotFoundError, NotConnectedError, asyncio.TimeoutError) as e:
+                _LOGGER.debug(f"Failed to initialize connection to {self.mac}: {e}")
+                await self.disconnect()
+                return False
+
+    async def _wait_for_services(self, timeout: float = SERVICE_DISCOVERY_TIMEOUT):
+        """Wait until GATT service discovery has resolved the characteristics we need.
+
+        BleakClient.connect() can return before the full service/characteristic
+        table is resolved (notably over Bluetooth proxies), so a fixed sleep is
+        not reliable here.
+        """
+        required_chars = (MAIN_CHAR, CFG_WRITE_CHAR, CFG_READ_CHAR)
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + timeout
+
+        while loop.time() < deadline:
+            services = self.client.services
+            if services and all(services.get_characteristic(uuid) for uuid in required_chars):
+                return
+            await asyncio.sleep(0.5)
+
+        raise BleakCharacteristicNotFoundError(MAIN_CHAR)
 
     async def connect_if_needed(self) -> bool:
         if not self.configuration or self.configuration.is_expired:
