@@ -1,6 +1,8 @@
 """Constants for the Qingping CGD1 Alarm Clock integration."""
 DOMAIN = "qingping_alarm_clock"
 
+XIAOMI_SERVICE_DATA_UUID = "0000fe95-0000-1000-8000-00805f9b34fb"
+
 ALARM_SLOTS_COUNT = 19
 CONF_ALARM_SLOT = "slot"
 CONF_ALARM_TIME = "time"

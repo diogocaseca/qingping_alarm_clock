@@ -9,7 +9,8 @@ from datetime import time as dtime
 from homeassistant.core import HomeAssistant
 from homeassistant.exceptions import ServiceValidationError
 from homeassistant.components.bluetooth import (
-    async_ble_device_from_address
+    async_ble_device_from_address,
+    BluetoothServiceInfoBleak
 )
 
 from .configuration import Configuration, Language
@@ -17,18 +18,21 @@ from .util import updates_configuration
 from .alarm import Alarm, AlarmDay
 from .eventbus import EventBus
 from .exceptions import NotConnectedError
+from .mibeacon import parse_mibeacon
 from ..const import (
     ALARM_SLOTS_COUNT,
     DISCONNECT_DELAY,
     CONNECTION_TIMEOUT,
     RETRY_INTERVAL,
-    SERVICE_DISCOVERY_TIMEOUT
+    SERVICE_DISCOVERY_TIMEOUT,
+    XIAOMI_SERVICE_DATA_UUID
 )
 from .events import (
     DEVICE_CONNECT,
     DEVICE_DISCONNECT,
     DEVICE_CONFIG_UPDATE,
-    ALARMS_UPDATE
+    ALARMS_UPDATE,
+    SENSOR_DATA_UPDATE
 )
 
 _LOGGER = logging.getLogger(__name__)
@@ -57,6 +61,20 @@ class Qingping:
         self.hass = hass
         self.mac = mac
         self.name = name
+        self.sensor_data: dict = {}
+
+    def update_from_advertisement(self, service_info: BluetoothServiceInfoBleak) -> None:
+        """Parse temperature/humidity/battery from a passive BLE advertisement."""
+        service_data = service_info.service_data.get(XIAOMI_SERVICE_DATA_UUID)
+        if not service_data:
+            return
+
+        parsed = parse_mibeacon(service_data)
+        if not parsed:
+            return
+
+        self.sensor_data.update(parsed)
+        self.eventbus.send(SENSOR_DATA_UPDATE, self.sensor_data)
 
     async def connect(self) -> bool:
         async with self._connect_lock:

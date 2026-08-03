@@ -15,12 +15,11 @@ from homeassistant.components.bluetooth import (
     async_discovered_service_info
 )
 
-from .const import DOMAIN
+from .const import DOMAIN, XIAOMI_SERVICE_DATA_UUID
 from .qingping import Qingping
 
 _LOGGER = logging.getLogger(__name__)
 
-XIAOMI_INC = "0000fe95-0000-1000-8000-00805f9b34fb"
 MANUAL_MAC = "manual_mac"
 
 
@@ -34,7 +33,7 @@ class CleargrassConfigFlow(ConfigFlow, domain=DOMAIN):
         self.name = "Qingping CGD1"
 
     def _is_device_supported(self, device_info):
-        service_data = device_info.service_data.get(XIAOMI_INC)
+        service_data = device_info.service_data.get(XIAOMI_SERVICE_DATA_UUID)
         if not service_data:
             return False
 

@@ -18,7 +18,8 @@ PLATFORMS: list[Platform] = [
     Platform.NUMBER,
     Platform.TIME,
     Platform.SELECT,
-    Platform.BINARY_SENSOR]
+    Platform.BINARY_SENSOR,
+    Platform.SENSOR]
 
 async def async_setup_entry(
     hass: HomeAssistant,
@@ -47,6 +48,7 @@ async def async_setup_entry(
     ):
         """Subscribe to bluetooth changes."""
         _LOGGER.debug("New service_info: %s", service_info)
+        instance.update_from_advertisement(service_info)
         hass.loop.create_task(_connect_if_needed())
 
     entry.async_on_unload(
