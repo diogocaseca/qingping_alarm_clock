@@ -18,7 +18,7 @@ from .util import updates_configuration
 from .alarm import Alarm, AlarmDay
 from .eventbus import EventBus
 from .exceptions import NotConnectedError
-from .mibeacon import parse_mibeacon
+from .advertisement import parse_advertisement
 from ..const import (
     ALARM_SLOTS_COUNT,
     DISCONNECT_DELAY,
@@ -74,11 +74,11 @@ class Qingping:
             )
             return
 
-        _LOGGER.debug(f"MiBeacon service_data from {self.mac}: {service_data.hex()}")
+        _LOGGER.debug(f"Advertisement service_data from {self.mac}: {service_data.hex()}")
 
-        parsed = parse_mibeacon(service_data)
+        parsed = parse_advertisement(service_data)
         if not parsed:
-            _LOGGER.debug(f"Could not parse any sensor data from MiBeacon payload: {service_data.hex()}")
+            _LOGGER.debug(f"Could not parse any sensor data from advertisement payload: {service_data.hex()}")
             return
 
         self.sensor_data.update(parsed)
