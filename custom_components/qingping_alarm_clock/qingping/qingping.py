@@ -67,10 +67,18 @@ class Qingping:
         """Parse temperature/humidity/battery from a passive BLE advertisement."""
         service_data = service_info.service_data.get(XIAOMI_SERVICE_DATA_UUID)
         if not service_data:
+            _LOGGER.debug(
+                f"No Xiaomi service_data in advertisement from {self.mac}; "
+                f"service_data keys={list(service_info.service_data.keys())}, "
+                f"manufacturer_data keys={list(service_info.manufacturer_data.keys())}"
+            )
             return
+
+        _LOGGER.debug(f"MiBeacon service_data from {self.mac}: {service_data.hex()}")
 
         parsed = parse_mibeacon(service_data)
         if not parsed:
+            _LOGGER.debug(f"Could not parse any sensor data from MiBeacon payload: {service_data.hex()}")
             return
 
         self.sensor_data.update(parsed)
