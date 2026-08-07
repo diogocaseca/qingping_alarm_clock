@@ -62,23 +62,37 @@ class Qingping:
         self.mac = mac
         self.name = name
         self.sensor_data: dict = {}
+        self._logged_missing_service_data = False
+        self._last_advertisement_data: bytes | None = None
 
     def update_from_advertisement(self, service_info: BluetoothServiceInfoBleak) -> None:
-        """Parse temperature/humidity/battery from a passive BLE advertisement."""
+        """Parse temperature/humidity/battery from a passive BLE advertisement.
+
+        Only logs each distinct payload once (the same advertisement repeats
+        very frequently), so a short debug-log capture window shows every
+        variant the device broadcasts instead of an unreadable flood.
+        """
         service_data = service_info.service_data.get(XIAOMI_SERVICE_DATA_UUID)
         if not service_data:
-            _LOGGER.debug(
-                f"No Xiaomi service_data in advertisement from {self.mac}; "
-                f"service_data keys={list(service_info.service_data.keys())}, "
-                f"manufacturer_data keys={list(service_info.manufacturer_data.keys())}"
-            )
+            if not self._logged_missing_service_data:
+                self._logged_missing_service_data = True
+                _LOGGER.debug(
+                    f"No Xiaomi service_data in advertisement from {self.mac}; "
+                    f"service_data keys={list(service_info.service_data.keys())}, "
+                    f"manufacturer_data keys={list(service_info.manufacturer_data.keys())}"
+                )
             return
 
-        _LOGGER.debug(f"Advertisement service_data from {self.mac}: {service_data.hex()}")
+        if service_data == self._last_advertisement_data:
+            return
+        self._last_advertisement_data = service_data
 
         parsed = parse_advertisement(service_data)
+        _LOGGER.debug(
+            f"Advertisement service_data from {self.mac}: {service_data.hex()} -> parsed={parsed}"
+        )
+
         if not parsed:
-            _LOGGER.debug(f"Could not parse any sensor data from advertisement payload: {service_data.hex()}")
             return
 
         self.sensor_data.update(parsed)
