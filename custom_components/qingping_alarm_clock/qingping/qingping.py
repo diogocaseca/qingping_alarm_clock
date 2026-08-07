@@ -2,7 +2,7 @@ import asyncio
 import logging
 import time
 from bleak import BleakClient
-from bleak.exc import BleakCharacteristicNotFoundError
+from bleak.exc import BleakError, BleakCharacteristicNotFoundError
 from bleak_retry_connector import establish_connection
 from datetime import time as dtime
 
@@ -129,7 +129,7 @@ class Qingping:
                 await self.get_alarms()
 
                 return True
-            except (BleakCharacteristicNotFoundError, NotConnectedError, asyncio.TimeoutError) as e:
+            except (BleakError, NotConnectedError, asyncio.TimeoutError) as e:
                 _LOGGER.debug(f"Failed to initialize connection to {self.mac}: {e}")
                 await self.disconnect()
                 return False
