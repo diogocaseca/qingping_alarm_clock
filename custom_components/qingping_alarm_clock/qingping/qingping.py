@@ -9,8 +9,7 @@ from datetime import time as dtime
 from homeassistant.core import HomeAssistant
 from homeassistant.exceptions import ServiceValidationError
 from homeassistant.components.bluetooth import (
-    async_ble_device_from_address,
-    BluetoothServiceInfoBleak
+    async_ble_device_from_address
 )
 
 from .configuration import Configuration, Language
@@ -18,21 +17,18 @@ from .util import updates_configuration
 from .alarm import Alarm, AlarmDay
 from .eventbus import EventBus
 from .exceptions import NotConnectedError
-from .advertisement import parse_advertisement
 from ..const import (
     ALARM_SLOTS_COUNT,
     DISCONNECT_DELAY,
     CONNECTION_TIMEOUT,
     RETRY_INTERVAL,
-    SERVICE_DISCOVERY_TIMEOUT,
-    XIAOMI_SERVICE_DATA_UUID
+    SERVICE_DISCOVERY_TIMEOUT
 )
 from .events import (
     DEVICE_CONNECT,
     DEVICE_DISCONNECT,
     DEVICE_CONFIG_UPDATE,
-    ALARMS_UPDATE,
-    SENSOR_DATA_UPDATE
+    ALARMS_UPDATE
 )
 
 _LOGGER = logging.getLogger(__name__)
@@ -61,42 +57,6 @@ class Qingping:
         self.hass = hass
         self.mac = mac
         self.name = name
-        self.sensor_data: dict = {}
-        self._logged_missing_service_data = False
-        self._last_advertisement_data: bytes | None = None
-
-    def update_from_advertisement(self, service_info: BluetoothServiceInfoBleak) -> None:
-        """Parse temperature/humidity/battery from a passive BLE advertisement.
-
-        Only logs each distinct payload once (the same advertisement repeats
-        very frequently), so a short debug-log capture window shows every
-        variant the device broadcasts instead of an unreadable flood.
-        """
-        service_data = service_info.service_data.get(XIAOMI_SERVICE_DATA_UUID)
-        if not service_data:
-            if not self._logged_missing_service_data:
-                self._logged_missing_service_data = True
-                _LOGGER.debug(
-                    f"No Xiaomi service_data in advertisement from {self.mac}; "
-                    f"service_data keys={list(service_info.service_data.keys())}, "
-                    f"manufacturer_data keys={list(service_info.manufacturer_data.keys())}"
-                )
-            return
-
-        if service_data == self._last_advertisement_data:
-            return
-        self._last_advertisement_data = service_data
-
-        parsed = parse_advertisement(service_data)
-        _LOGGER.debug(
-            f"Advertisement service_data from {self.mac}: {service_data.hex()} -> parsed={parsed}"
-        )
-
-        if not parsed:
-            return
-
-        self.sensor_data.update(parsed)
-        self.eventbus.send(SENSOR_DATA_UPDATE, self.sensor_data)
 
     async def connect(self) -> bool:
         async with self._connect_lock:
