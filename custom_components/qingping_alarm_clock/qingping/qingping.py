@@ -2,7 +2,6 @@ import asyncio
 import logging
 import time
 from bleak import BleakClient
-from bleak.exc import BleakError, BleakCharacteristicNotFoundError
 from bleak_retry_connector import establish_connection
 from datetime import time as dtime
 
@@ -22,7 +21,7 @@ from ..const import (
     DISCONNECT_DELAY,
     CONNECTION_TIMEOUT,
     RETRY_INTERVAL,
-    SERVICE_DISCOVERY_TIMEOUT
+    SERVICE_DISCOVERY_TIMEOUT,
 )
 from .events import (
     DEVICE_CONNECT,
@@ -36,31 +35,59 @@ _LOGGER = logging.getLogger(__name__)
 MAIN_CHAR       = "00000001-0000-1000-8000-00805f9b34fb"
 CFG_WRITE_CHAR  = "0000000B-0000-1000-8000-00805f9b34fb"
 CFG_READ_CHAR   = "0000000C-0000-1000-8000-00805f9b34fb"
+REQUIRED_CHARS = (MAIN_CHAR, CFG_WRITE_CHAR, CFG_READ_CHAR)
+EMPTY_ALARM_BYTES = bytes.fromhex("ffffffffff")
 
 AUTH_STEP_1 = bytes.fromhex("1101ea600e964287ea7d17894900da6174bd")
 AUTH_STEP_2 = bytes.fromhex("1102ea600e964287ea7d17894900da6174bd")
 
 
 class Qingping:
-    client = None
-    configuration = None
-    alarms: list[Alarm] = []
-    eventbus = EventBus()
-
-    _connect_lock = asyncio.Lock()
-    _configuration_event = asyncio.Event()
-    _alarms_event = asyncio.Event()
-    _disconnect_task = None
-
     def __init__(self, hass: HomeAssistant, mac: str, name: str):
         """Initialize the Qingping CGD1 Alarm Clock."""
         self.hass = hass
         self.mac = mac
         self.name = name
+        self.client = None
+        self._connected = False
+        self.configuration = None
+        self.alarms: list[Alarm] = []
+        self.eventbus = EventBus()
+        self._connect_lock = asyncio.Lock()
+        self._configuration_event = asyncio.Event()
+        self._alarms_event = asyncio.Event()
+        self._disconnect_task = None
+        self._notify_started = False
+        self._alarm_map: dict[int, Alarm] = {}
+
+    @staticmethod
+    def _empty_alarm(slot: int) -> Alarm:
+        return Alarm(slot, EMPTY_ALARM_BYTES)
+
+    def _finalize_alarms_from_map(self):
+        self.alarms = [
+            self._alarm_map.get(index, self._empty_alarm(index))
+            for index in range(ALARM_SLOTS_COUNT)
+        ]
+        if not self._alarms_event.is_set():
+            self._alarms_event.set()
+        self.eventbus.send(ALARMS_UPDATE, self.alarms)
+
+    @property
+    def connected(self) -> bool:
+        """Authoritative connection state, driven by connect success / disconnect callback."""
+        return self._connected
+
+    def _set_connected(self, value: bool):
+        if self._connected == value:
+            return
+        self._connected = value
+        self.eventbus.send(DEVICE_CONNECT if value else DEVICE_DISCONNECT, self)
 
     async def connect(self) -> bool:
         async with self._connect_lock:
             if self.client and self.client.is_connected:
+                self._set_connected(True)
                 return True
 
             device = async_ble_device_from_address(self.hass, self.mac, connectable=True)
@@ -73,7 +100,7 @@ class Qingping:
                 self.client = await establish_connection(
                     BleakClient,
                     device,
-                    self.mac,
+                    self.name,
                     disconnected_callback=self._on_disconnect,
                 )
             except Exception as e:
@@ -81,9 +108,13 @@ class Qingping:
                 return False
 
             try:
-                await self._wait_for_services()
+                await self._ensure_required_characteristics()
 
                 _LOGGER.debug(f"Connected to {self.mac}, authenticating...")
+
+                if not self._notify_started:
+                    await self.client.start_notify(CFG_READ_CHAR, self._notification_handler)
+                    self._notify_started = True
 
                 # Step 1 auth
                 await self._write_gatt_char(MAIN_CHAR, AUTH_STEP_1)
@@ -91,41 +122,25 @@ class Qingping:
                 # Step 2 auth
                 await self._write_gatt_char(MAIN_CHAR, AUTH_STEP_2)
 
-                self.eventbus.send(DEVICE_CONNECT, self)
-
                 # Read configuration
                 _LOGGER.debug("Reading configuration...")
-                await self.client.start_notify(CFG_READ_CHAR, self._notification_handler)
                 await self.get_configuration()
 
                 # Read alarms
                 _LOGGER.debug("Reading alarms...")
-                await self.get_alarms()
-
-                return True
-            except (BleakError, NotConnectedError, asyncio.TimeoutError) as e:
-                _LOGGER.debug(f"Failed to initialize connection to {self.mac}: {e}")
+                try:
+                    await self.get_alarms()
+                except Exception as e:
+                    # Alarm sync is best-effort during bootstrap; keep connection usable.
+                    _LOGGER.debug("Skipping alarm preload for %s: %s", self.mac, e)
+            except Exception as e:
+                _LOGGER.debug("Failed to initialize %s after connection: %s", self.mac, e)
                 await self.disconnect()
                 return False
 
-    async def _wait_for_services(self, timeout: float = SERVICE_DISCOVERY_TIMEOUT):
-        """Wait until GATT service discovery has resolved the characteristics we need.
+            self._set_connected(True)
 
-        BleakClient.connect() can return before the full service/characteristic
-        table is resolved (notably over Bluetooth proxies), so a fixed sleep is
-        not reliable here.
-        """
-        required_chars = (MAIN_CHAR, CFG_WRITE_CHAR, CFG_READ_CHAR)
-        loop = asyncio.get_running_loop()
-        deadline = loop.time() + timeout
-
-        while loop.time() < deadline:
-            services = self.client.services
-            if services and all(services.get_characteristic(uuid) for uuid in required_chars):
-                return
-            await asyncio.sleep(0.5)
-
-        raise BleakCharacteristicNotFoundError(MAIN_CHAR)
+            return True
 
     async def connect_if_needed(self) -> bool:
         if not self.configuration or self.configuration.is_expired:
@@ -136,13 +151,20 @@ class Qingping:
     async def disconnect(self) -> bool:
         if self.client and self.client.is_connected:
             _LOGGER.debug(f"Disconnecting from {self.mac}...")
+            if self._notify_started:
+                try:
+                    await self.client.stop_notify(CFG_READ_CHAR)
+                except Exception:
+                    _LOGGER.debug("Failed to stop notifications for %s", self.mac)
+                finally:
+                    self._notify_started = False
             await self.client.disconnect()
             return True
 
         return False
 
     async def delayed_disconnect(self):
-        if not self.client.is_connected:
+        if not self.client or not self.client.is_connected:
             return
 
         try:
@@ -157,8 +179,9 @@ class Qingping:
 
     async def get_configuration(self):
         if self.client and self.client.is_connected:
+            self._configuration_event.clear()
             await self._write_config(b"\x01\x02")
-            await self._configuration_event.wait()
+            await asyncio.wait_for(self._configuration_event.wait(), timeout=CONNECTION_TIMEOUT)
         else:
             raise NotConnectedError("Not connected")
 
@@ -186,8 +209,10 @@ class Qingping:
 
     async def get_alarms(self):
         if self.client and self.client.is_connected:
+            self._alarm_map = {}
+            self._alarms_event.clear()
             await self._write_config(b"\x01\x06")
-            await self._alarms_event.wait()
+            await asyncio.wait_for(self._alarms_event.wait(), timeout=CONNECTION_TIMEOUT)
         else:
             raise NotConnectedError("Not connected")
 
@@ -195,7 +220,7 @@ class Qingping:
         self,
         slot: int,
         is_enabled: bool | None,
-        time: dtime | None,
+        atime: dtime | None,
         days: set[AlarmDay] | None,
         snooze: bool | None
     ) -> bool:
@@ -206,8 +231,8 @@ class Qingping:
             alarm: Alarm = self.alarms[slot]
             if is_enabled is not None:
                 alarm.is_enabled = is_enabled
-            if time is not None:
-                alarm.time = time
+            if atime is not None:
+                alarm.time = atime
             if days is not None:
                 alarm.days = days
             if snooze is not None:
@@ -339,6 +364,37 @@ class Qingping:
         else:
             raise NotConnectedError("Not connected")
 
+    async def _ensure_required_characteristics(self, timeout: float = SERVICE_DISCOVERY_TIMEOUT):
+        """Wait until service discovery has resolved the characteristics we need.
+
+        establish_connection() can return before the full GATT table is resolved
+        (notably over Bluetooth proxies), so poll for a while before giving up.
+        """
+        if not self.client or not self.client.is_connected:
+            raise NotConnectedError("Not connected")
+
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + timeout
+
+        while True:
+            services = self.client.services
+            if not services:
+                services = await self.client.get_services()
+
+            missing_chars = [
+                characteristic_uuid
+                for characteristic_uuid in REQUIRED_CHARS
+                if not services.get_characteristic(characteristic_uuid)
+            ]
+            if not missing_chars:
+                return
+
+            if loop.time() >= deadline:
+                raise NotConnectedError(
+                    f"Device {self.mac} is missing required characteristics: {', '.join(missing_chars)}"
+                )
+            await asyncio.sleep(0.5)
+
     def _get_timestamp_bytes(self, timestamp: int):
         timestamp_bytes = [0] * 6
         timestamp_bytes[0] = 0x05
@@ -351,9 +407,13 @@ class Qingping:
         return bytes(timestamp_bytes)
 
     async def _notification_handler(self, sender, data):
-        if sender.uuid.lower() == CFG_READ_CHAR.lower():
+        sender_uuid = getattr(sender, "uuid", "")
+        if sender_uuid.lower() == CFG_READ_CHAR.lower():
             _LOGGER.debug(f"<< {sender.uuid}: {data.hex()}")
             if data.startswith(b"\x13\x02"):
+                if len(data) < 15:
+                    _LOGGER.debug("Ignoring malformed config payload from %s: %s", self.mac, data.hex())
+                    return
                 _LOGGER.debug(f"Got configuration bytes: {data.hex()}")
                 self.configuration = Configuration(data)
 
@@ -363,19 +423,31 @@ class Qingping:
                 _LOGGER.debug(f"Got alarms bytes: {data.hex()}")
                 slot_offset = data[2]
                 if slot_offset == 0:
-                    self.alarms = []
+                    self._alarm_map = {}
 
-                self.alarms.append(Alarm(slot_offset, data[3:8]))
-                self.alarms.append(Alarm(slot_offset + 1, data[8:13]))
-                self.alarms.append(Alarm(slot_offset + 2, data[13:18]))
+                alarm_chunks = (
+                    (slot_offset, data[3:8]),
+                    (slot_offset + 1, data[8:13]),
+                    (slot_offset + 2, data[13:18]),
+                )
+                for slot, alarm_data in alarm_chunks:
+                    if 0 <= slot < ALARM_SLOTS_COUNT:
+                        self._alarm_map[slot] = Alarm(slot, alarm_data)
 
-                self._alarms_event.set()
-                self.eventbus.send(ALARMS_UPDATE, self.alarms)
+                expected_slots = set(range(ALARM_SLOTS_COUNT))
+                has_full_set = expected_slots.issubset(self._alarm_map.keys())
+                has_terminal_empty_chunk = all(alarm_data == EMPTY_ALARM_BYTES for _, alarm_data in alarm_chunks)
+
+                if has_full_set or has_terminal_empty_chunk:
+                    self._finalize_alarms_from_map()
+            elif data.startswith(b"\x11\x06"):
+                _LOGGER.debug("Ignoring malformed alarms payload from %s: %s", self.mac, data.hex())
 
     def _on_disconnect(self, client: BleakClient):
         if self._disconnect_task is not None:
             self._disconnect_task.cancel()
             self._disconnect_task = None
 
+        self._notify_started = False
         self.client = None
-        self.eventbus.send(DEVICE_DISCONNECT, self)
+        self._set_connected(False)

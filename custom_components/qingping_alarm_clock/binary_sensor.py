@@ -22,26 +22,36 @@ class QingpingConnectedBinarySensor(BinarySensorEntity):
     def __init__(self, instance: Qingping, config_entry: ConfigEntry):
         self._instance: Qingping = instance
         self._config_entry = config_entry
+        mac_unique = instance.mac.lower().replace(":", "")
         self._attr_name = f"{config_entry.data[CONF_NAME]} Connected"
-        self._attr_unique_id = f"{config_entry.data[CONF_NAME]}_is_connected"
+        self._attr_unique_id = f"{mac_unique}_is_connected"
         self._attr_device_class = "connectivity"
         self._attr_entity_category = EntityCategory.DIAGNOSTIC
-        self._attr_is_on = False
-        self._attr_icon = "mdi:bluetooth-off"
+        self._set_connected(instance.connected)
 
         instance.eventbus.add_listener(DEVICE_CONNECT, self.on_connect)
         instance.eventbus.add_listener(DEVICE_DISCONNECT, self.on_disconnect)
+
+    def _set_connected(self, is_connected: bool):
+        self._attr_is_on = is_connected
+        self._attr_icon = "mdi:bluetooth-connect" if is_connected else "mdi:bluetooth-off"
+
+    async def async_added_to_hass(self) -> None:
+        self._set_connected(self._instance.connected)
+        self.schedule_update_ha_state()
 
     @property
     def device_info(self) -> DeviceInfo:
         return async_device_device_info_fn(self._instance, self._config_entry.data[CONF_NAME])
 
     async def on_connect(self, instance: Qingping):
-        self._attr_is_on = True
-        self._attr_icon = "mdi:bluetooth-connect"
+        self._set_connected(True)
         self.schedule_update_ha_state()
 
     async def on_disconnect(self, instance: Qingping):
-        self._attr_is_on = False
-        self._attr_icon = "mdi:bluetooth-off"
+        self._set_connected(False)
         self.schedule_update_ha_state()
+
+    async def async_will_remove_from_hass(self) -> None:
+        self._instance.eventbus.remove_listener(DEVICE_CONNECT, self.on_connect)
+        self._instance.eventbus.remove_listener(DEVICE_DISCONNECT, self.on_disconnect)
