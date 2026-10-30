@@ -9,6 +9,7 @@ from custom_components.qingping_alarm_clock.qingping.qingping import (
     CFG_READ_CHAR,
     Qingping,
 )
+from custom_components.qingping_alarm_clock.qingping.exceptions import NotConnectedError
 from custom_components.qingping_alarm_clock.qingping.events import (
     DEVICE_CONNECT,
     DEVICE_DISCONNECT,
@@ -85,6 +86,49 @@ async def test_ensure_required_characteristics_fetches_services_when_missing(qin
     await qingping_instance._ensure_required_characteristics()
 
     assert qingping_instance.client.get_services_called is True
+
+
+@pytest.mark.asyncio
+async def test_ensure_required_characteristics_waits_for_late_discovery(qingping_instance):
+    from custom_components.qingping_alarm_clock.qingping.qingping import REQUIRED_CHARS
+
+    services = _FakeServices([])
+    qingping_instance.client = _FakeClient(services=services)
+
+    async def resolve_services_later():
+        await asyncio.sleep(0.1)
+        services._available_characteristics.update(REQUIRED_CHARS)
+
+    task = asyncio.create_task(resolve_services_later())
+
+    await qingping_instance._ensure_required_characteristics(timeout=5)
+    await task
+
+    assert qingping_instance.client.get_services_called is False
+
+
+@pytest.mark.asyncio
+async def test_ensure_required_characteristics_raises_after_timeout(qingping_instance):
+    from custom_components.qingping_alarm_clock.qingping.qingping import REQUIRED_CHARS
+
+    present = REQUIRED_CHARS[:1]
+    missing = REQUIRED_CHARS[1:]
+    qingping_instance.client = _FakeClient(services=_FakeServices(present))
+
+    with pytest.raises(NotConnectedError) as exc_info:
+        await qingping_instance._ensure_required_characteristics(timeout=0)
+
+    message = str(exc_info.value)
+    assert all(uuid in message for uuid in missing)
+    assert present[0] not in message
+
+
+@pytest.mark.asyncio
+async def test_ensure_required_characteristics_requires_connection(qingping_instance):
+    qingping_instance.client = None
+
+    with pytest.raises(NotConnectedError):
+        await qingping_instance._ensure_required_characteristics()
 
 
 @pytest.mark.asyncio
