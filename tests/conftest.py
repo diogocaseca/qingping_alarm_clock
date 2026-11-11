@@ -50,6 +50,9 @@ def _install_homeassistant_stubs():
     def async_ble_device_from_address(*args, **kwargs):
         return None
 
+    def async_last_service_info(*args, **kwargs):
+        return None
+
     homeassistant_core.HomeAssistant = HomeAssistant
     homeassistant_core.callback = callback
     homeassistant_config_entries.ConfigEntry = ConfigEntry
@@ -57,6 +60,7 @@ def _install_homeassistant_stubs():
     homeassistant_exceptions.HomeAssistantError = HomeAssistantError
     homeassistant_exceptions.ServiceValidationError = ServiceValidationError
     homeassistant_bluetooth.async_ble_device_from_address = async_ble_device_from_address
+    homeassistant_bluetooth.async_last_service_info = async_last_service_info
     homeassistant_binary_sensor.BinarySensorEntity = BinarySensorEntity
     homeassistant_helpers_entity.EntityCategory = EntityCategory
     homeassistant_helpers_entity.DeviceInfo = DeviceInfo

@@ -8,7 +8,8 @@ from datetime import time as dtime
 from homeassistant.core import HomeAssistant
 from homeassistant.exceptions import ServiceValidationError
 from homeassistant.components.bluetooth import (
-    async_ble_device_from_address
+    async_ble_device_from_address,
+    async_last_service_info
 )
 
 from .configuration import Configuration, Language
@@ -31,6 +32,10 @@ from .events import (
 )
 
 _LOGGER = logging.getLogger(__name__)
+
+# Minimum time between WARNING-level connection failure logs (the discovery
+# callback can trigger a reconnect on every advertisement).
+FAILURE_LOG_INTERVAL = 300
 
 MAIN_CHAR       = "00000001-0000-1000-8000-00805f9b34fb"
 CFG_WRITE_CHAR  = "0000000B-0000-1000-8000-00805f9b34fb"
@@ -59,6 +64,9 @@ class Qingping:
         self._disconnect_task = None
         self._notify_started = False
         self._alarm_map: dict[int, Alarm] = {}
+        self._last_connect_error: str | None = None
+        self._last_failure_log = 0.0
+        self._expected_disconnect = False
 
     @staticmethod
     def _empty_alarm(slot: int) -> Alarm:
@@ -84,6 +92,27 @@ class Qingping:
         self._connected = value
         self.eventbus.send(DEVICE_CONNECT if value else DEVICE_DISCONNECT, self)
 
+    def _describe_link(self) -> str:
+        """Which adapter/proxy last heard the clock, and how strongly."""
+        info = async_last_service_info(self.hass, self.mac, connectable=True)
+        if info is None:
+            return "no recent advertisement from any adapter/proxy"
+        return f"heard by {info.source} (rssi {info.rssi})"
+
+    def _record_connect_failure(self, stage: str, error: Exception | str):
+        """Remember why the last connection attempt failed, and surface it."""
+        if isinstance(error, Exception):
+            error = f"{type(error).__name__}: {error}".rstrip(": ")
+        self._last_connect_error = f"{stage} - {error}"
+
+        message = "Connection to %s failed at '%s' (%s); %s"
+        now = time.monotonic()
+        if now - self._last_failure_log >= FAILURE_LOG_INTERVAL:
+            self._last_failure_log = now
+            _LOGGER.warning(message, self.mac, stage, error, self._describe_link())
+        else:
+            _LOGGER.debug(message, self.mac, stage, error, self._describe_link())
+
     async def connect(self) -> bool:
         async with self._connect_lock:
             if self.client and self.client.is_connected:
@@ -93,6 +122,7 @@ class Qingping:
             device = async_ble_device_from_address(self.hass, self.mac, connectable=True)
             if device is None:
                 _LOGGER.error(f"No adapters can reach the device with address {self.mac}")
+                self._last_connect_error = "no adapter/proxy can reach the device"
                 return False
 
             _LOGGER.debug(f"Connecting to {self.mac}...")
@@ -104,7 +134,7 @@ class Qingping:
                     disconnected_callback=self._on_disconnect,
                 )
             except Exception as e:
-                _LOGGER.debug(f"Failed to connect to {self.mac}: {e}")
+                self._record_connect_failure("establish connection", e)
                 return False
 
             try:
@@ -134,10 +164,11 @@ class Qingping:
                     # Alarm sync is best-effort during bootstrap; keep connection usable.
                     _LOGGER.debug("Skipping alarm preload for %s: %s", self.mac, e)
             except Exception as e:
-                _LOGGER.debug("Failed to initialize %s after connection: %s", self.mac, e)
+                self._record_connect_failure("authenticate/read config", e)
                 await self.disconnect()
                 return False
 
+            self._last_connect_error = None
             self._set_connected(True)
 
             return True
@@ -158,6 +189,7 @@ class Qingping:
                     _LOGGER.debug("Failed to stop notifications for %s", self.mac)
                 finally:
                     self._notify_started = False
+            self._expected_disconnect = True
             await self.client.disconnect()
             return True
 
@@ -327,13 +359,20 @@ class Qingping:
                     _LOGGER.info("Successfully connected to the Bluetooth device.")
                     return
                 else:
-                    _LOGGER.error("Failed to connect. Retrying in %s seconds...", RETRY_INTERVAL)
+                    _LOGGER.error(
+                        "Failed to connect to %s (%s; %s). Retrying in %s seconds...",
+                        self.mac, self._last_connect_error or "unknown reason",
+                        self._describe_link(), RETRY_INTERVAL
+                    )
                     await asyncio.sleep(RETRY_INTERVAL)
 
         try:
             await asyncio.wait_for(wait_for_connected(), CONNECTION_TIMEOUT)
         except asyncio.TimeoutError:
-            _LOGGER.error("Connection timeout.")
+            _LOGGER.error(
+                "Connection to %s timed out after %s s (last error: %s)",
+                self.mac, CONNECTION_TIMEOUT, self._last_connect_error or "unknown"
+            )
             raise NotConnectedError("Connection timeout")
 
     async def _ensure_configuration(self):
@@ -444,6 +483,14 @@ class Qingping:
                 _LOGGER.debug("Ignoring malformed alarms payload from %s: %s", self.mac, data.hex())
 
     def _on_disconnect(self, client: BleakClient):
+        if self._connected and not self._expected_disconnect:
+            _LOGGER.warning(
+                "Connection to %s was lost unexpectedly (%s)", self.mac, self._describe_link()
+            )
+        else:
+            _LOGGER.debug("Disconnected from %s (expected: %s)", self.mac, self._expected_disconnect)
+        self._expected_disconnect = False
+
         if self._disconnect_task is not None:
             self._disconnect_task.cancel()
             self._disconnect_task = None

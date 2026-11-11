@@ -324,3 +324,59 @@ async def test_alarm_notification_completes_when_stream_ends_early(qingping_inst
 
     assert qingping_instance._alarms_event.is_set() is True
     assert len(qingping_instance.alarms) == ALARM_SLOTS_COUNT
+
+
+@pytest.mark.asyncio
+async def test_connect_failure_records_reason_and_logs_warning(qingping_instance, monkeypatch, caplog):
+    from custom_components.qingping_alarm_clock.qingping import qingping as module
+
+    async def failing_establish_connection(*args, **kwargs):
+        raise TimeoutError("proxy did not answer")
+
+    monkeypatch.setattr(module, "async_ble_device_from_address", lambda *a, **k: object())
+    monkeypatch.setattr(module, "establish_connection", failing_establish_connection)
+
+    with caplog.at_level("WARNING"):
+        assert await qingping_instance.connect() is False
+
+    assert "establish connection" in qingping_instance._last_connect_error
+    assert "proxy did not answer" in qingping_instance._last_connect_error
+    assert "proxy did not answer" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_repeated_connect_failures_do_not_spam_warnings(qingping_instance, monkeypatch, caplog):
+    from custom_components.qingping_alarm_clock.qingping import qingping as module
+
+    async def failing_establish_connection(*args, **kwargs):
+        raise TimeoutError("boom")
+
+    monkeypatch.setattr(module, "async_ble_device_from_address", lambda *a, **k: object())
+    monkeypatch.setattr(module, "establish_connection", failing_establish_connection)
+
+    with caplog.at_level("WARNING"):
+        for _ in range(3):
+            await qingping_instance.connect()
+
+    assert caplog.text.count("failed at 'establish connection'") == 1
+
+
+def test_unexpected_disconnect_logs_warning(qingping_instance, caplog):
+    qingping_instance._connected = True
+
+    with caplog.at_level("WARNING"):
+        qingping_instance._on_disconnect(None)
+
+    assert "lost unexpectedly" in caplog.text
+    assert qingping_instance.connected is False
+
+
+def test_expected_disconnect_is_not_a_warning(qingping_instance, caplog):
+    qingping_instance._connected = True
+    qingping_instance._expected_disconnect = True
+
+    with caplog.at_level("WARNING"):
+        qingping_instance._on_disconnect(None)
+
+    assert "lost unexpectedly" not in caplog.text
+    assert qingping_instance._expected_disconnect is False
