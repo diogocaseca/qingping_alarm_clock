@@ -213,7 +213,7 @@ class Configuration:
         config_byte |= 0 if self.alarms_on else (1 << 4)
         byte_array.append(config_byte)
 
-        byte_array.append(self.timezone_offset // 6)
+        byte_array.append(self._timezone_offset // 6)  # absolute value; the sign is sent in byte 13
         byte_array.append(self.screen_light_time)
         byte_array.append(
             self._brightness_to_byte(self.daytime_brightness, self.nighttime_brightness)
